@@ -1,0 +1,122 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torchvision import datasets, transforms
+from torch.utils.data import DataLoader
+import torch.optim as optim
+import numpy as np
+
+# Define your neural network model
+class YourModel(nn.Module):
+    def __init__(self, num_classes):
+        super(YourModel, self).__init__()
+        self.conv1 = nn.Conv2d(in_channels=3, out_channels=32, kernel_size=3, padding=1)
+        self.relu = nn.ReLU()
+        self.maxpool = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.fc1 = nn.Linear(32 * 16 * 16, 128)
+        self.fc2 = nn.Linear(128, num_classes)
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
+        x = x.view(x.size(0), -1)
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.fc2(x)
+        return x
+
+# Function to calculate class weights based on the dataset distribution
+def calculate_class_weights(dataset):
+    class_counts = np.zeros(num_classes)
+    for data, label in dataset:
+        class_counts[label] += 1
+    total_samples = len(dataset)
+    class_weights = total_samples / (class_counts * num_classes)
+    class_weights /= np.sum(class_weights)
+    return class_weights
+
+# Define data transformations
+transform = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+])
+
+# Load CIFAR-10 training dataset
+train_dataset = datasets.CIFAR10(root='./data', train=True, transform=transform, download=True)
+batch_size = 32
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+
+# Calculate class weights based on the dataset
+num_classes = len(train_dataset.classes)
+class_weights = calculate_class_weights(train_dataset)
+
+# Instantiate your model and optimizer
+model = YourModel(num_classes)
+optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
+
+# Define the Focal Loss
+class FocalLoss(nn.Module):
+    def __init__(self, gamma=2, alpha=1):
+        super(FocalLoss, self).__init__()
+        self.gamma = gamma
+        self.alpha = alpha
+
+    def forward(self, inputs, targets):
+        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
+        pt = torch.exp(-ce_loss)
+        focal_loss = (1 - pt) ** self.gamma * ce_loss
+        weighted_focal_loss = self.alpha * focal_loss
+        return weighted_focal_loss.mean()
+
+# Define the Class-Balanced Loss
+class ClassBalancedLoss(nn.Module):
+    def __init__(self, class_weights, gamma=2):
+        super(ClassBalancedLoss, self).__init__()
+        self.class_weights = torch.Tensor(class_weights)
+        self.gamma = gamma
+
+    def forward(self, inputs, targets):
+        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
+        weights = self.class_weights[targets]
+        cb_loss = torch.pow(1 - torch.exp(-ce_loss), self.gamma) * ce_loss
+        weighted_cb_loss = cb_loss * weights
+        return weighted_cb_loss.mean()
+
+# Define the Hybrid Loss that combines Focal Loss and Class-Balanced Loss
+class HybridLoss(nn.Module):
+    def __init__(self, focal_loss_weight, class_balanced_loss_weight, gamma=2, class_weights=None):
+        super(HybridLoss, self).__init__()
+        self.focal_loss = FocalLoss(gamma=gamma)
+        if class_weights is not None:
+            self.class_balanced_loss = ClassBalancedLoss(class_weights, gamma=gamma)
+        else:
+            self.class_balanced_loss = None
+        self.focal_loss_weight = focal_loss_weight
+        self.class_balanced_loss_weight = class_balanced_loss_weight
+
+    def forward(self, inputs, targets):
+        focal_loss_term = self.focal_loss(inputs, targets) * self.focal_loss_weight
+        if self.class_balanced_loss is not None:
+            class_balanced_loss_term = self.class_balanced_loss(inputs, targets) * self.class_balanced_loss_weight
+            return focal_loss_term + class_balanced_loss_term
+        else:
+            return focal_loss_term
+
+# Instantiate the Hybrid Loss with weightings for Focal Loss and Class-Balanced Loss
+focal_loss_weight = 0.5
+class_balanced_loss_weight = 0.5  # You can adjust these weights
+loss_criterion = HybridLoss(focal_loss_weight, class_balanced_loss_weight, gamma=2, class_weights=class_weights)
+
+# Training loop for a limited number of epochs (e.g., 10)
+num_epochs = 10
+for epoch in range(num_epochs):
+    model.train()
+    for batch in train_loader:
+        inputs, targets = batch
+        optimizer.zero_grad()
+        outputs = model(inputs)
+        loss = loss_criterion(outputs, targets)
+        loss.backward()
+        optimizer.step()
+    print(f"Epoch [{epoch + 1}/{num_epochs}] Loss: {loss.item():.4f}")
